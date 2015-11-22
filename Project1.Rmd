@@ -1,0 +1,234 @@
+---
+title: "Predicting correct weight lifting"
+author: "Hermann Hess"
+date: "November 21, 2015"
+output: html_document
+---
+
+## How the model was built
+
+```{r setoptions, echo = FALSE}
+library("knitr", lib.loc="~/R/win-library/3.1")
+opts_chunk$set(echo = TRUE)
+```
+
+The model's main objective is to predict, according to data from accelerometers 
+on the belt, forearm, arm, and dumbbell of 6 participants, whether the 
+participants doing the weight-lifting exercises are doing it correctly (coded as
+classe A) or incorrectly (coded as classe B,C,D or E). [*]
+
+The data were taken from <http://groupware.les.inf.puc-rio.br/har> and 
+correspond to 19622 observations on 160 variables for the training set and 20 
+observations on the same number of variables for the testing set.
+
+It was first necessary to compare the two data sets to make sure they both had 
+the same columns, especially the NA columns. This was true except for the last 
+column (response variable "classe") in the training set and the corresponding 
+last (case id) column in the testing set. Due to the extensive size of the data 
+set (19622 observations on each variable) and lack of domain-specific knowledge, 
+corrections for outliers was not done for either training nor testing data.  
+
+Downloading the data sets and exploratory analysis were carried out running the 
+following code chunk:  
+
+```{r read_data, cache=TRUE, results='hide'}
+# Read training set
+#
+fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileURL,destfile = "./train.csv")
+downloaded <- date()
+training <- read.csv("./train.csv")
+head(training)
+str(training) # 'data.frame':	19622 obs. of  160 variables
+# Read testing
+fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileURL,destfile = "./test.csv")
+downloaded <- date()
+testing <- read.csv("./test.csv")
+head(testing)
+str(testing)  # 'data.frame':	20 obs. of  160 variables
+#
+names(testing) == names(training)  # FALSE for last (response) column
+# To compare if NA columns the same in testing and training
+length_testing_NAs <- vector(length=length(testing))
+for (i in 1:length(testing)){
+    length_testing_NAs[i] = sum(complete.cases(testing[,i]))
+}
+# 
+length_training_NAs <- vector(length=length(training))
+for (i in 1:length(training)){
+    length_training_NAs[i] = sum(complete.cases(training[,i]))
+}
+cbind(length_testing_NAs,length_training_NAs) # All complete testing -> training  
+```
+
+The next step was to get rid of incomplete cases (columns with all or almost all 
+NAs) and the first 7 columns of both data sets, which include unnecessary 
+features such as *name* and *timestamp*. This follows the key idea 'to predict X
+use data related to X' and to focus only on important features.   
+
+In addition, the *classe* response variable was converted to numeric, and it 
+should also be noted that Zero covariates 
+(`nearZeroVar(training3,saveMetrics = TRUE)`) are no problem in this data set.
+
+```{r clean_data, cache=TRUE, results='hide'}
+completes <- which(length_testing_NAs == 20, arr.ind = TRUE, useNames = TRUE)
+testing1  <-  testing[,completes]    # Now 60 variables
+training1 <- training[,completes]    # Also 60 variables 
+# Eliminate variables that don't seem to be good features (1-7)
+training2 <- training1[,-(1:7)]      # 53 variables
+testing2  <-  testing1[,-(1:7)]      # 53 variables
+training2$classe <- as.numeric(as.character(training1$classe))
+training2$classe <- as.numeric(training1$classe)
+```
+
+It is also important at this point to check for highly correlated regressors in 
+the dataset, which was explored estimating the correlation matrix and focusing 
+on correlations larger than 0.80; in conjunction with the VIF stepwise 
+procedure. This allowed for the elimination of 21 more variables from the 
+model's dataset, for a final total of 31 covariates.
+
+```{r correlations, cache=TRUE, results='hide'}
+co <- abs(cor(training2[,-53]))
+diag(co) <- 0
+wh <- which(co > 0.80, arr.ind=TRUE)
+elim <- c(1,2,3,4,9,10,11,19,21,22,25,26,33,34,35,36,37,39,46,47,48)
+training3 <- training2[,-elim]
+testing3  <-  testing2[,-elim]
+```
+
+Finally, the model was set up using the *caret* package and setting the seed to 
+an arbitrary integer for reproducibility. A generalized linear regression was 
+chosen as estimation technique, using all available predictors.
+
+```{r setup_model, cache=TRUE, results='hide'}
+library("caret", lib.loc="~/R/win-library/3.1")
+set.seed(201115)
+mod3 <- train(classe ~., data = training3, method = "glm")
+summary(mod3) # Almost all coeff significant
+```
+
+The results of this model appear quite good in that almost all coefficients 
+(except *gyros_belt_z* , *gyros_arm_z* and *gyros_forearm_y* ) are 
+significant. 
+
+```{r table_mod3, cache=TRUE, results='asis'}
+library(pander)
+panderOptions('table.split.table',108)  # , Inf
+tabl <- summary(mod3)[[11]]
+pander(tabl, caption="Summary of mod3 coefficients", style = "rmarkdown")
+```
+
+Analysis of residuals is in general not altogether unfavorable to the model (see 
+the Appendix), but a downside is that the plot of residuals vs observations 
+shows a clear upward trend. This result leads to possible future improvements of
+the model.
+
+```{r, residual_plot, echo=FALSE}
+require(graphics)
+plot(residuals(mod3), main = "Figure 1 - Residuals vs fitted from mod3", 
+xlab = "Observation", ylab = "Residuals")
+fig.cap="Figure 1" 
+```
+
+
+## Cross validation
+
+Cross-validation is basically a way of measuring the predictive performance of a
+statistical model. Cross-validation is a general name for all techniques that 
+use a test set different than the train set. By allowing cases in the testing 
+set different from those in the training set, CV inherently offers protection 
+against overfitting. In this case of linear regression, cross-validation 
+consists basically of predictive performance, which will be discussed below.
+
+Prediction was implemented according to the following code sequence, where 
+numerical output was converted back to the original factor levels by rounding 
+the numerical output to the nearest factor level ("A" is 1, "B" is 2, etc.):
+
+```{r predict_model, cache=TRUE, results='hide'}
+mod3_pred <- predict(mod3,newdata = testing3)
+nums <- round(mod3_pred)
+letters <- unique(training1$classe)
+results <- vector(length=20)
+for (i in 1:length(nums)){
+    results[i] <- as.character(letters[nums[i]])
+}
+```
+
+
+## Expected out of sample error 
+
+The predictive accuracy of a model can be measured by the mean squared error (or 
+RMSE) on the test set, although as will be briefly commented below, even if the 
+response was converted to numeric the categorical nature of *classe* also 
+deserves to look at out of sample error from another perspective. This latter 
+measure will generally be larger than the MSE on the training set because the 
+test data were not used for estimation. The results for this model are the 
+following:  
+
+**Generalized Linear Model** 
+
+19622 samples
+   49 predictor
+
+No pre-processing
+*Resampling: Bootstrapped (25 reps)* 
+Summary of sample sizes: 19622, 19622, 19622, 19622, 19622, 19622, ...   
+
+```{r table_mod3a, cache=TRUE, results='asis'}
+library(pander)
+panderOptions('table.split.table',Inf)  # , Inf
+pander(mod3[[4]][2:5], caption="Summary of mod3", style = "rmarkdown")
+```
+
+
+## Justifying choices
+
+The risk of correlation between variables was initially deemed to be small in 
+principle since these are measurements on different and independent movements, 
+but that assumption changed with the analysis and the regressor set was 
+downsized considerably.     
+
+As to the choice of model, in the original paper the authors justify using 
+Random Forests with Bagging. Here a linear regression model was chosen mainly 
+because of **interpretability** - if the objective is to correct wrong ways of 
+doing weights it is important to be able to interpret the contributing factors; 
+and linear regression makes that comparatively easy.  The author
+of this report does not have substantive knowledge of the field so as to 
+interpret the magnitude and signs of the estimated model; but for the end users 
+those results ought to be a high priority of a model's output. 
+
+## Prediction of 20 different test cases
+
+Predicted classes were the following:
+
+"C" "B" "B" "B" "B" "C" "D" "D" "A" "B" "C" "C" "C" "A" "D" "B" "B" "C" "C" "C" 
+
+Going back to a previous comment on the categorical nature of the outcome, it is
+important to point out that the *accuracy* of this model (fraction of correct 
+predictions) is not very good: only 8 out of 20 (40 percent). This result is 
+probably induced by nonlinearity and/or overfitting (still too many variables) 
+in the training set, and again points to possible future improvements in the 
+model; or to simply changing the approach back to Random Forests with Bagging 
+(as suggested by the authors) and using tools such as PCA to reduce the number 
+of potential predictors in the model.
+
+## Reference
+
+ 
+[*] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. *Qualitative 
+Activity Recognition of Weight Lifting Exercises*. Proceedings of 4th 
+International Conference in Cooperation with SIGCHI (Augmented Human '13). 
+Stuttgart, Germany: ACM SIGCHI, 2013.
+
+
+## Appendix - analysis of residuals
+
+```{r, residuals_plot, echo=FALSE}
+require(graphics)
+plot(mod3$finalModel)
+fig.cap="Figure 1" 
+```
+
+
+
